@@ -18,14 +18,6 @@ function getTools(): Tool[] {
       },
     },
     {
-      name: 'threatlocker_organizations_get_auth_key',
-      description: 'Get the organization auth key.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {},
-      },
-    },
-    {
       name: 'threatlocker_organizations_for_move_computers',
       description: 'Get organizations available for moving computers.',
       inputSchema: {
@@ -49,11 +41,6 @@ async function handleCall(toolName: string, args: Record<string, unknown>): Prom
       logger.info('API call: organizations.listChildren', params);
       const result = await client.organizations.listChildren(params);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-    }
-    case 'threatlocker_organizations_get_auth_key': {
-      logger.info('API call: organizations.getAuthKey');
-      const authKey = await client.organizations.getAuthKey();
-      return { content: [{ type: 'text', text: JSON.stringify(authKey, null, 2) }] };
     }
     case 'threatlocker_organizations_for_move_computers': {
       logger.info('API call: organizations.listForMoveComputers');

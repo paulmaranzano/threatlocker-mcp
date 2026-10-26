@@ -9,6 +9,7 @@ import { logger } from '../utils/logger.js';
 
 const ENV_KEYS = [
   'CONDUIT_S2S_SECRET',
+  'MCP_HTTP_TOKEN',
   'MCP_ALLOW_INSECURE_DEV',
   'MCP_HTTP_HOST',
   'MCP_HTTP_PORT',
@@ -81,6 +82,7 @@ function useHttpEnv(overrides: Record<string, string | undefined> = {}): void {
   delete process.env.THREATLOCKER_ORGANIZATION_ID;
   delete process.env.THREATLOCKER_INSTANCE;
   delete process.env.CONDUIT_S2S_SECRET;
+  delete process.env.MCP_HTTP_TOKEN;
   for (const [key, value] of Object.entries(overrides)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -288,5 +290,51 @@ describe('HTTP request auth', () => {
     expect(body.credentials).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain(ENV_API_KEY);
     expect(credsSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('HTTP proxy bearer auth (MCP_HTTP_TOKEN)', () => {
+  const TOKEN = 'proxy-bearer-token-for-tests';
+  const initializeBody = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '1' } },
+  });
+
+  async function start(): Promise<number> {
+    useHttpEnv({ AUTH_MODE: 'env', MCP_HTTP_TOKEN: TOKEN, THREATLOCKER_API_KEY: ENV_API_KEY });
+    const server = startHttpServer();
+    servers.push(server);
+    await listening(server);
+    return portOf(server);
+  }
+
+  function post(port: number, auth?: string): Promise<Response> {
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+    };
+    if (auth) headers.authorization = auth;
+    return fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers, body: initializeBody });
+  }
+
+  it('starts without CONDUIT_S2S_SECRET when MCP_HTTP_TOKEN is set', async () => {
+    const exit = vi.spyOn(process, 'exit').mockImplementation(throwOnExit);
+    await start();
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 without a bearer token', async () => {
+    expect((await post(await start())).status).toBe(401);
+  });
+
+  it('returns 401 with the wrong bearer token', async () => {
+    expect((await post(await start(), 'Bearer wrong')).status).toBe(401);
+  });
+
+  it('accepts the right bearer token', async () => {
+    const response = await post(await start(), `Bearer ${TOKEN}`);
+    expect(response.status).toBe(200);
   });
 });

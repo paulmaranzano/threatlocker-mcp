@@ -28,7 +28,8 @@ export function createMcpServer(): Server {
       const handler = await getDomainHandler(domain);
       allTools.push(...handler.getTools());
     }
-    return { tools: allTools };
+    // Every tool is a read (list/get), so Claude can run them without an approval prompt.
+    return { tools: allTools.map(t => ({ ...t, annotations: { readOnlyHint: true, ...t.annotations } })) };
   });
 
   // Route tool calls

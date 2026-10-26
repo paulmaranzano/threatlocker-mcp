@@ -5,13 +5,13 @@ FROM node:26-alpine AS builder
 ARG VERSION="unknown"
 ARG COMMIT_SHA="unknown"
 ARG BUILD_DATE="unknown"
-ARG NODE_AUTH_TOKEN
 
 # Set working directory
 WORKDIR /app
 
-# Copy package files and .npmrc for GitHub Packages auth
-COPY package*.json .npmrc ./
+# Copy package files and the vendored SDK (no GitHub Packages auth needed)
+COPY package*.json ./
+COPY vendor ./vendor
 
 # Install dependencies (--ignore-scripts prevents 'prepare' from running before source is copied)
 RUN npm ci --ignore-scripts
@@ -22,11 +22,8 @@ COPY . .
 # Build the application
 RUN npm run build
 
-# Prune dev dependencies in builder stage (while .npmrc auth is still available)
-RUN npm prune --omit=dev
-
-# Remove .npmrc so auth token is not leaked into production image
-RUN rm -f .npmrc
+# Prune dev dependencies
+RUN npm prune --omit=dev && rm -f .npmrc
 
 # Production stage
 FROM node:26-alpine AS production

@@ -4,6 +4,7 @@ import { createMcpServer } from './server.js';
 import { runWithCredentials } from './utils/client.js';
 import { logger } from './utils/logger.js';
 import { verifyS2sHeader, S2S_HEADER } from './s2s-verify.js';
+import { timingSafeEqual } from 'node:crypto';
 
 const INSECURE_DEV_FLAG = 'MCP_ALLOW_INSECURE_DEV';
 
@@ -13,12 +14,29 @@ export function readS2sSecret(): string {
 }
 
 /**
+ * Shared bearer token from an auth proxy in front of this container
+ * (National IT: mcp-auth-proxy swaps the caller's token for this one).
+ * Empty means "not configured".
+ */
+export function readBearerToken(): string {
+  return (process.env.MCP_HTTP_TOKEN ?? '').trim();
+}
+
+function bearerMatches(header: string | undefined, token: string): boolean {
+  const match = /^Bearer (.+)$/.exec(header ?? '');
+  if (!match) return false;
+  const provided = Buffer.from(match[1]);
+  const expected = Buffer.from(token);
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
+}
+
+/**
  * Fail closed: do not listen on HTTP unless the service-to-service secret
- * is configured. MCP_ALLOW_INSECURE_DEV=1 is the only override, and it is
+ * or the proxy bearer token is configured. MCP_ALLOW_INSECURE_DEV=1 is the only override, and it is
  * local-development only. Never log the secret value.
  */
 export function assertS2sSecretConfigured(): void {
-  if (readS2sSecret()) return;
+  if (readS2sSecret() || readBearerToken()) return;
 
   if (process.env[INSECURE_DEV_FLAG] === '1') {
     const warning =
@@ -83,6 +101,13 @@ export function startHttpServer(): Server {
           error: 'Missing or invalid X-Gateway-S2S header: this endpoint only accepts requests signed by the gateway.',
         })
       );
+      return;
+    }
+
+    const bearerToken = readBearerToken();
+    if (bearerToken && !bearerMatches(headerString(req.headers.authorization), bearerToken)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing or invalid bearer token.' }));
       return;
     }
 

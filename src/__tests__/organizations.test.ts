@@ -17,11 +17,10 @@ beforeEach(() => {
 });
 
 describe('organizationsHandler.getTools', () => {
-  it('exposes exactly the three organization tools', () => {
+  it('exposes exactly the two organization tools (get_auth_key removed)', () => {
     const names = organizationsHandler.getTools().map((t) => t.name);
     expect(names).toEqual([
       'threatlocker_organizations_list_children',
-      'threatlocker_organizations_get_auth_key',
       'threatlocker_organizations_for_move_computers',
     ]);
   });
@@ -46,35 +45,6 @@ describe('threatlocker_organizations_list_children', () => {
     expect(result.content[0].text).toBe(
       JSON.stringify({ organizations: [{ id: 'org-child-1' }] }, null, 2),
     );
-  });
-});
-
-describe('threatlocker_organizations_get_auth_key', () => {
-  it('calls getAuthKey scoped to whatever the current request-scoped client resolved to (no args)', async () => {
-    const getAuthKey = vi.fn().mockResolvedValue({ authKey: 'redacted-in-this-test' });
-    mockClient({ getAuthKey });
-
-    const result = await organizationsHandler.handleCall('threatlocker_organizations_get_auth_key', {});
-
-    expect(getAuthKey).toHaveBeenCalledWith();
-    expect(getAuthKey).toHaveBeenCalledTimes(1);
-    expect(result.content[0].text).toBe(
-      JSON.stringify({ authKey: 'redacted-in-this-test' }, null, 2),
-    );
-  });
-
-  it('does not accept caller-supplied args as an override for which org the key belongs to', async () => {
-    // getAuthKey takes no parameters — the org is entirely determined by the
-    // request-scoped client (tenant credentials), never by tool args. This
-    // guards against a future regression that threads an org id through here.
-    const getAuthKey = vi.fn().mockResolvedValue({ authKey: 'k' });
-    mockClient({ getAuthKey });
-
-    await organizationsHandler.handleCall('threatlocker_organizations_get_auth_key', {
-      organizationId: 'attacker-supplied-org-id',
-    });
-
-    expect(getAuthKey).toHaveBeenCalledWith();
   });
 });
 
