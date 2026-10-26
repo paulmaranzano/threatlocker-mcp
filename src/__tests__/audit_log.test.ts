@@ -28,72 +28,89 @@ describe('auditLogHandler.getTools', () => {
 });
 
 describe('threatlocker_audit_search', () => {
-  it('passes searchText and dates through unchanged when searchText is supplied', async () => {
-    const search = vi.fn().mockResolvedValue({ items: [] });
-    mockClient({ search });
+  function mockSearch(rows: unknown[]) {
+    const requestWithMeta = vi.fn().mockResolvedValue({ data: rows });
+    mockClient({ http: { requestWithMeta } });
+    return requestWithMeta;
+  }
+  const bodyOf = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls[0][1].body;
+
+  it('posts hostname, Deny (actionId 3), actionType and filePath to ActionLogGetByParametersV2', async () => {
+    const req = mockSearch([]);
 
     await auditLogHandler.handleCall('threatlocker_audit_search', {
-      searchText: 'chrome.exe',
-      pageNumber: 3,
-      pageSize: 25,
-      childOrganizations: false,
+      hostname: 'BEG-PC28',
+      action: 'Deny',
+      actionType: 'execute',
+      filePath: '*chrome.exe*',
+      startDate: '2026-09-27T00:00:00.000Z',
+      endDate: '2026-10-27T00:00:00.000Z',
+      childOrganizations: true,
     });
 
-    expect(search).toHaveBeenCalledWith({
-      searchText: 'chrome.exe',
-      startDate: undefined,
-      endDate: undefined,
-      pageNumber: 3,
-      pageSize: 25,
-      childOrganizations: false,
+    expect(req.mock.calls[0][0]).toBe('/ActionLog/ActionLogGetByParametersV2');
+    expect(req.mock.calls[0][1].headers).toEqual({ usenewsearch: 'true' });
+    expect(bodyOf(req)).toEqual({
+      startDate: '2026-09-27T00:00:00Z',
+      endDate: '2026-10-27T00:00:00Z',
+      pageNumber: 1,
+      pageSize: 50,
+      paramsFieldsDto: [],
+      showChildOrganizations: true,
+      hostname: 'BEG-PC28',
+      actionId: 3,
+      actionType: 'execute',
+      fullPath: '*chrome.exe*',
     });
   });
 
-  it('passes an explicit date range through unchanged, without eliciting', async () => {
-    const search = vi.fn().mockResolvedValue({ items: [] });
-    mockClient({ search });
-
-    await auditLogHandler.handleCall('threatlocker_audit_search', {
-      startDate: '2026-01-01T00:00:00.000Z',
-      endDate: '2026-01-02T00:00:00.000Z',
-    });
-
-    expect(search).toHaveBeenCalledWith(
-      expect.objectContaining({
-        startDate: '2026-01-01T00:00:00.000Z',
-        endDate: '2026-01-02T00:00:00.000Z',
-      }),
-    );
+  it('keeps searchText as an alias for filePath', async () => {
+    const req = mockSearch([]);
+    await auditLogHandler.handleCall('threatlocker_audit_search', { searchText: 'c:\\x.exe' });
+    expect(bodyOf(req).fullPath).toBe('c:\\x.exe');
   });
 
-  it('elicits a date range when neither searchText nor a date range is given, and (with no MCP server ref registered in tests) elicitation short-circuits to null so no range is computed', async () => {
-    const search = vi.fn().mockResolvedValue({ items: [] });
-    mockClient({ search });
-
-    await auditLogHandler.handleCall('threatlocker_audit_search', {});
-
-    expect(search).toHaveBeenCalledTimes(1);
-    const params = search.mock.calls[0][0];
-    expect(params.searchText).toBeUndefined();
-    // elicitSelection() returns null (no `server` ref in test env), and the
-    // handler only computes a range for its literal 'Last 24h'/'Last 7d'/
-    // 'Last 30d' matches — a null choice leaves both dates undefined, same
-    // as its documented 'Custom' path.
-    expect(params.startDate).toBeUndefined();
-    expect(params.endDate).toBeUndefined();
-  });
-
-  it('returns the raw search results as JSON', async () => {
-    const search = vi.fn().mockResolvedValue({ items: [{ id: 'a1' }], total: 1 });
-    mockClient({ search });
-
+  it('groups by processPath (groupBys 2), sorts by count and keeps only the grouped field', async () => {
+    mockSearch([
+      { groupByCount: 1, processPath: 'a.exe', fullPath: 'x', username: 'u' },
+      { groupByCount: 101, processPath: 'powershell.exe', fullPath: 'y' },
+    ]);
     const result = await auditLogHandler.handleCall('threatlocker_audit_search', {
-      searchText: 'x',
+      hostname: 'BEG-PC28',
+      action: 'Deny',
+      groupBy: 'processPath',
     });
+    const out = JSON.parse(result.content[0].text);
+    expect(out.groups).toEqual([
+      { count: 101, processPath: 'powershell.exe' },
+      { count: 1, processPath: 'a.exe' },
+    ]);
+    expect(out.pageSize).toBe(500);
+    expect(out.hasMore).toBe(false);
+  });
 
-    expect(result.content[0].text).toBe(
-      JSON.stringify({ items: [{ id: 'a1' }], total: 1 }, null, 2),
-    );
+  it('trims rows to useful fields and reports hasMore when the page is full', async () => {
+    mockSearch([{ hostname: 'h', action: 'Deny', certs: [], policyExists: false, notes: '' }]);
+    const result = await auditLogHandler.handleCall('threatlocker_audit_search', { hostname: 'h', pageSize: 1 });
+    const out = JSON.parse(result.content[0].text);
+    expect(out.items).toEqual([{ hostname: 'h', action: 'Deny' }]);
+    expect(out.hasMore).toBe(true);
+  });
+
+  it('rejects an unknown groupBy or action without calling the API', async () => {
+    const req = mockSearch([]);
+    const bad = await auditLogHandler.handleCall('threatlocker_audit_search', { hostname: 'h', groupBy: 'colour' });
+    const badAction = await auditLogHandler.handleCall('threatlocker_audit_search', { hostname: 'h', action: 'Maybe' });
+    expect(bad.isError).toBe(true);
+    expect(badAction.isError).toBe(true);
+    expect(req).not.toHaveBeenCalled();
+  });
+
+  it('defaults to the 24h before now when no dates are given and elicitation is unavailable', async () => {
+    const req = mockSearch([]);
+    await auditLogHandler.handleCall('threatlocker_audit_search', {});
+    const { startDate, endDate } = bodyOf(req);
+    expect(new Date(endDate).getTime() - new Date(startDate).getTime()).toBe(24 * 60 * 60 * 1000);
   });
 });
 

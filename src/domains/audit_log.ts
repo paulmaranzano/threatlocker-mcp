@@ -8,15 +8,28 @@ function getTools(): Tool[] {
   return [
     {
       name: 'threatlocker_audit_search',
-      description: 'Search audit log entries with optional filters.',
+      description:
+        'Search the ThreatLocker unified audit log. Filter by hostname, action (Permit/Deny), actionType and filePath. ' +
+        'Set groupBy to get counts per username, processPath, parentProcess or filePath, sorted highest first ' +
+        '(e.g. "top 10 denies on BEG-PC28": hostname + action Deny + groupBy processPath). ' +
+        'Rows are trimmed to the useful fields. There is no reliable total: hasMore is true when a page comes back full.',
       inputSchema: {
         type: 'object' as const,
         properties: {
-          searchText: { type: 'string', description: 'Search text filter' },
-          startDate: { type: 'string', description: 'Start date filter (ISO 8601)' },
-          endDate: { type: 'string', description: 'End date filter (ISO 8601)' },
+          hostname: { type: 'string', description: 'Exact computer hostname, e.g. BEG-PC28' },
+          action: { type: 'string', enum: ['Permit', 'Deny'], description: 'Only Permit or only Deny rows' },
+          actionType: { type: 'string', description: 'e.g. execute, network, install, read, write' },
+          filePath: { type: 'string', description: 'Full file path of the target; * wildcards allowed, e.g. *chrome.exe*' },
+          searchText: { type: 'string', description: 'Deprecated alias for filePath' },
+          groupBy: {
+            type: 'string',
+            enum: Object.keys(GROUP_BY_IDS),
+            description: 'Return one row per group with a count, sorted by count (highest first)',
+          },
+          startDate: { type: 'string', description: 'Start date filter (ISO 8601). Defaults to 24h before endDate.' },
+          endDate: { type: 'string', description: 'End date filter (ISO 8601). Defaults to now.' },
           pageNumber: { type: 'number', description: 'Page number (default 1)' },
-          pageSize: { type: 'number', description: 'Page size (default 50)' },
+          pageSize: { type: 'number', description: 'Page size (default 50, groups default 500)' },
           childOrganizations: { type: 'boolean', description: 'Include child organizations' },
         },
       },
@@ -91,8 +104,8 @@ async function handleCall(toolName: string, args: Record<string, unknown>): Prom
 
   switch (toolName) {
     case 'threatlocker_audit_search': {
-      // Elicitation: if no searchText AND no date range, elicit date range
-      const hasSearchText = !!args.searchText;
+      // Elicitation: if no filter AND no date range, elicit date range
+      const hasSearchText = !!(args.searchText || args.filePath || args.hostname);
       const hasDateRange = !!(args.startDate || args.endDate);
 
       let startDate = args.startDate as string | undefined;
@@ -119,17 +132,64 @@ async function handleCall(toolName: string, args: Record<string, unknown>): Prom
         // For 'Custom', leave dates undefined to prompt user to specify
       }
 
-      const params = {
-        searchText: args.searchText as string | undefined,
-        startDate,
-        endDate,
-        pageNumber: args.pageNumber as number | undefined,
-        pageSize: args.pageSize as number | undefined,
-        childOrganizations: args.childOrganizations as boolean | undefined,
+      const groupBy = typeof args.groupBy === 'string' ? args.groupBy : undefined;
+      if (groupBy && !(groupBy in GROUP_BY_IDS)) {
+        return {
+          content: [{ type: 'text', text: `Invalid groupBy "${groupBy}". Valid: ${Object.keys(GROUP_BY_IDS).join(', ')}` }],
+          isError: true,
+        };
+      }
+      const action = typeof args.action === 'string' ? args.action : undefined;
+      if (action && !(action in ACTION_IDS)) {
+        return {
+          content: [{ type: 'text', text: `Invalid action "${action}". Valid: ${Object.keys(ACTION_IDS).join(', ')}` }],
+          isError: true,
+        };
+      }
+
+      const pageNumber = (args.pageNumber as number | undefined) ?? 1;
+      const pageSize = (args.pageSize as number | undefined) ?? (groupBy ? 500 : 50);
+      const end = toIsoSeconds(endDate ?? new Date());
+      const body: Record<string, unknown> = {
+        startDate: toIsoSeconds(startDate ?? new Date(new Date(end).getTime() - DAY_MS)),
+        endDate: end,
+        pageNumber,
+        pageSize,
+        paramsFieldsDto: [],
+        showChildOrganizations: (args.childOrganizations as boolean | undefined) ?? false,
       };
-      logger.info('API call: auditLog.search', params);
-      const result = await client.auditLog.search(params);
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      const filePath = nonEmptyString(args.filePath) ?? nonEmptyString(args.searchText);
+      const hostname = nonEmptyString(args.hostname);
+      const actionType = nonEmptyString(args.actionType);
+      if (filePath) body.fullPath = filePath;
+      if (hostname) body.hostname = hostname;
+      if (actionType) body.actionType = actionType;
+      if (action) body.actionId = ACTION_IDS[action];
+      if (groupBy) body.groupBys = [GROUP_BY_IDS[groupBy]];
+
+      logger.info('API call: ActionLogGetByParametersV2', body);
+      // node-threatlocker's auditLog.search() cannot send actionId or groupBys, so post the same
+      // request through its HTTP client.
+      const { data } = await client.auditLog.http.requestWithMeta('/ActionLog/ActionLogGetByParametersV2', {
+        method: 'POST',
+        body,
+        headers: { usenewsearch: 'true' },
+      });
+      const rows: Record<string, unknown>[] = Array.isArray(data) ? data : data?.items ?? [];
+      const result = groupBy
+        ? {
+            groupBy,
+            groups: rows
+              .map(r => ({ count: r.groupByCount, ...slimRow(r, GROUP_FIELDS[groupBy]) }))
+              .sort((a, b) => Number(b.count) - Number(a.count)),
+          }
+        : { items: rows.map(r => slimRow(r)) };
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ ...result, page: pageNumber, pageSize, returned: rows.length, hasMore: rows.length === pageSize }, null, 2),
+        }],
+      };
     }
     case 'threatlocker_audit_get': {
       // node-threatlocker@3.0.0 (WYREAI-386): get(id: string, { sourceTableId }?)
@@ -217,6 +277,44 @@ const FILE_HISTORY_ARG_ERROR =
   'threatlocker_audit_file_history requires fullPath and either hostname or computerId. ' +
   'ActionLogGetAllForFileHistoryV2 returns HTTP 417 "Missing Parameters. Unable to load details." ' +
   'when only fullPath is sent.';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// actionId values seen in the Portal API: 1 Permit, 3 Deny.
+const ACTION_IDS: Record<string, number> = { Permit: 1, Deny: 3 };
+
+// groupBys ids, confirmed against the live API (each grouping's counts sum to the ungrouped total).
+const GROUP_BY_IDS: Record<string, number> = { username: 1, processPath: 2, parentProcess: 4, filePath: 10 };
+
+// For a grouped row, the fields that are actually constant across the group.
+const GROUP_FIELDS: Record<string, string[]> = {
+  username: ['username'],
+  processPath: ['processPath'],
+  parentProcess: ['createdByProcess'],
+  filePath: ['fullPath', 'sha256Hash'],
+};
+
+const ROW_FIELDS = [
+  'dateTime', 'hostname', 'username', 'action', 'actionType', 'fullPath', 'processPath',
+  'createdByProcess', 'policyName', 'applicationName', 'sha256Hash', 'destinationIPAddress',
+  'destinationPort', 'eActionLogId', 'computerId', 'organizationId',
+];
+
+function slimRow(row: Record<string, unknown>, fields: string[] = ROW_FIELDS): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const f of fields) {
+    if (row[f] !== null && row[f] !== undefined && row[f] !== '') out[f] = row[f];
+  }
+  return out;
+}
+
+function toIsoSeconds(value: string | Date): string {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) {
+    throw new Error(`Invalid audit log date "${String(value)}". Use an ISO 8601 timestamp.`);
+  }
+  return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
 
 function nonEmptyString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
