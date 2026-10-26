@@ -10,7 +10,7 @@ import { logger } from './logger.js';
  * probing all of them with the key finds the right one.
  */
 
-export const PORTAL_INSTANCES = ['g', 'b', 'c', 'd', 'e', 'f', 'h'] as const;
+export const PORTAL_INSTANCES = ['g', 'b', 'c', 'd', 'e', 'f', 'h', 'au1'] as const;
 
 const PROBE_PATH = '/portalapi/ApprovalRequest/ApprovalRequestGetCount';
 const PROBE_TIMEOUT_MS = 8000;
@@ -45,7 +45,7 @@ export async function detectInstance(apiKey: string): Promise<string> {
   } catch {
     throw new Error(
       'Could not auto-detect the ThreatLocker portal instance: the API key was ' +
-        'rejected by all portal instances (b–h). Verify the API key, or set ' +
+        'rejected by all portal instances (b-h, au1). Verify the API key, or set ' +
         'the portal instance explicitly.',
     );
   }

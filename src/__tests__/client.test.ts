@@ -85,6 +85,14 @@ describe('getClient portal-instance routing', () => {
     });
   });
 
+  it('accepts the Australian au1 instance', async () => {
+    process.env.THREATLOCKER_API_KEY = 'env-key';
+    process.env.THREATLOCKER_INSTANCE = 'au1';
+
+    const client = await getClient();
+    expect(client.creds.baseUrl).toBe('https://portalapi.au1.threatlocker.com/portalapi');
+  });
+
   it('auto-detects the portal instance when none is set', async () => {
     process.env.THREATLOCKER_API_KEY = 'env-key';
     process.env.THREATLOCKER_ORGANIZATION_ID = 'env-org';

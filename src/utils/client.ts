@@ -22,7 +22,8 @@ export interface Credentials {
 
 // Hostname-safety guard: the instance is user-supplied (gateway header /
 // env var) and is interpolated into a hostname.
-const INSTANCE_RE = /^[a-z]{1,10}$/;
+// Letters, then letters/digits: b..h in the US, au1 in Australia.
+const INSTANCE_RE = /^[a-z][a-z0-9]{0,9}$/;
 
 // Request-scoped credential store. In gateway mode the HTTP layer runs each
 // request inside runWithCredentials({apiKey, ...}); getCredentials() reads
